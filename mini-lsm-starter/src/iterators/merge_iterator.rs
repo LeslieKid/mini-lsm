@@ -4,7 +4,7 @@
 use std::cmp::{self};
 use std::collections::BinaryHeap;
 
-use anyhow::Result;
+use anyhow::{Ok, Result};
 
 use crate::key::KeySlice;
 
@@ -47,7 +47,18 @@ pub struct MergeIterator<I: StorageIterator> {
 
 impl<I: StorageIterator> MergeIterator<I> {
     pub fn create(iters: Vec<Box<I>>) -> Self {
-        unimplemented!()
+        let mut heap = BinaryHeap::new();
+        for (idx, iter) in iters.into_iter().enumerate() {
+            if iter.is_valid() {
+                heap.push(HeapWrapper(idx, iter));
+            }
+        }
+
+        let current = heap.pop();
+        MergeIterator {
+            iters: heap,
+            current,
+        }
     }
 }
 
@@ -57,18 +68,49 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
     type KeyType<'a> = KeySlice<'a>;
 
     fn key(&self) -> KeySlice {
-        unimplemented!()
+        match &self.current {
+            Some(current) => current.1.key(),
+            None => KeySlice::from_slice(&[]),
+        }
     }
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        match &self.current {
+            Some(current) => current.1.value(),
+            None => &[],
+        }
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        self.current.is_some()
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        loop {
+            let peek = self.iters.peek();
+            if let Some(peek) = peek {
+                if peek.1.key().eq(&self.key()) {
+                    let iter = self.iters.pop();
+                    if let Some(mut iter) = iter {
+                        iter.1.next()?;
+                        if iter.1.is_valid() {
+                            self.iters.push(iter);
+                        }
+                    }
+                    continue;
+                }
+            };
+            break;
+        }
+
+        if let Some(mut current) = self.current.take() {
+            current.1.next()?;
+            if current.1.is_valid() {
+                self.iters.push(current);
+            }
+        };
+        self.current = self.iters.pop();
+
+        Ok(())
     }
 }
