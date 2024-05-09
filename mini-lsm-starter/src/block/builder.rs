@@ -1,6 +1,7 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
+use core::panic;
 use std::mem::size_of;
 
 use bytes::BufMut;
@@ -43,7 +44,12 @@ impl BlockBuilder {
         let val_len = value.len() as u16;
         // key_len + value_len + sizeof(offset) + sizeof(key_len) + sizeof(val_len)
         let other = (key_len + val_len + (size_of::<u16>() * 3) as u16) as usize;
+        // Fix: process the situation that self.is_empty && self.full_after_add(other)
         if self.full_after_add(other) && !self.is_empty() {
+            for _ in 0..self.block_size - self.current_size {
+                self.data.push(0);
+                self.current_size += 1;
+            }
             return false;
         }
 
@@ -71,7 +77,18 @@ impl BlockBuilder {
     }
 
     /// Finalize the block.
-    pub fn build(self) -> Block {
+    pub fn build(mut self) -> Block {
+        if self.is_empty() {
+            panic!("build a empty block is invalid.")
+        }
+
+        if self.block_size >= self.current_size {
+            for _ in 0..(self.block_size - self.current_size) {
+                self.data.push(0);
+                self.current_size += 1;
+            }
+            assert_eq!(self.block_size, self.current_size);
+        }
         Block {
             data: self.data,
             offsets: self.offsets,

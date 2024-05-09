@@ -19,11 +19,11 @@ impl Block {
     /// Note: You may want to recheck if any of the expected field is missing from your output
     pub fn encode(&self) -> Bytes {
         let mut blk = self.data.clone();
+        let off_len = self.offsets.len() as u16;
         for off in self.offsets.iter() {
             blk.put_u16(*off);
         }
-        let ele_num: u16 = self.offsets.len() as u16;
-        blk.put_u16(ele_num);
+        blk.put_u16(off_len);
         blk.into()
     }
 
@@ -31,8 +31,8 @@ impl Block {
     pub fn decode(data: &[u8]) -> Self {
         let blk = data.to_vec();
         let blk_len = blk.len();
-        let ele_num = u16::from_be_bytes(blk[blk_len - 2..].try_into().unwrap());
-        let data_len = blk_len - 2 - 2 * ele_num as usize;
+        let off_len = (&blk[blk_len - 2..]).get_u16() as usize;
+        let data_len = (blk_len - 2 - 2 * off_len) as usize;
         let offsets = blk[data_len..blk_len - 2]
             .chunks(2)
             .map(|mut x| x.get_u16())
