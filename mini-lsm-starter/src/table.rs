@@ -9,9 +9,9 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{anyhow, Ok, Result};
 pub use builder::SsTableBuilder;
-use bytes::Buf;
+use bytes::{Buf, BufMut, Bytes};
 pub use iterator::SsTableIterator;
 
 use crate::block::Block;
@@ -32,19 +32,37 @@ pub struct BlockMeta {
 
 impl BlockMeta {
     /// Encode block meta to a buffer.
-    /// You may add extra fields to the buffer,
+    /// You may add extra fields (metadata) to the buffer,
     /// in order to help keep track of `first_key` when decoding from the same buffer in the future.
-    pub fn encode_block_meta(
-        block_meta: &[BlockMeta],
-        #[allow(clippy::ptr_arg)] // remove this allow after you finish
-        buf: &mut Vec<u8>,
-    ) {
-        unimplemented!()
+    pub fn encode_block_meta(block_meta: &[BlockMeta], buf: &mut Vec<u8>) {
+        for meta in block_meta {
+            buf.put_u32(meta.offset as u32);
+            buf.put_u16(meta.first_key.len() as u16);
+            let mut first_key = meta.first_key.raw_ref().to_vec();
+            buf.append(&mut first_key);
+            buf.put_u16(meta.last_key.len() as u16);
+            let mut last_key = meta.last_key.raw_ref().to_vec();
+            buf.append(&mut last_key);
+        }
     }
 
     /// Decode block meta from a buffer.
-    pub fn decode_block_meta(buf: impl Buf) -> Vec<BlockMeta> {
-        unimplemented!()
+    pub fn decode_block_meta(mut buf: impl Buf) -> Vec<BlockMeta> {
+        let mut block_meta = Vec::<BlockMeta>::new();
+        while buf.remaining() > 0 {
+            let offset = buf.get_u32() as usize;
+            let first_key_len = buf.get_u16() as usize;
+            let first_key = KeyBytes::from_bytes(buf.copy_to_bytes(first_key_len));
+            let last_key_len = buf.get_u16() as usize;
+            let last_key = KeyBytes::from_bytes(buf.copy_to_bytes(last_key_len));
+            let meta = BlockMeta {
+                offset,
+                first_key,
+                last_key,
+            };
+            block_meta.push(meta);
+        }
+        block_meta
     }
 }
 
@@ -108,7 +126,36 @@ impl SsTable {
 
     /// Open SSTable from a file.
     pub fn open(id: usize, block_cache: Option<Arc<BlockCache>>, file: FileObject) -> Result<Self> {
-        unimplemented!()
+        let len = file.size();
+        // read the last 4 bytes (u32) of the file
+        let meta_offset = {
+            let raw_meta_offset = file.read(len - 4, 4)?;
+            (&raw_meta_offset[..]).get_u32()
+        } as u64;
+        let buf = &file.read(meta_offset, len - meta_offset - 4)?[..];
+        let block_meta = BlockMeta::decode_block_meta(buf);
+
+        let first_key = match block_meta.first() {
+            Some(meta) => meta.first_key.clone(),
+            None => KeyBytes::from_bytes(Bytes::new()),
+        };
+        let last_key = match block_meta.last() {
+            Some(meta) => meta.last_key.clone(),
+            None => KeyBytes::from_bytes(Bytes::new()),
+        };
+
+        let sst = SsTable {
+            file,
+            block_meta,
+            block_meta_offset: meta_offset as usize,
+            id,
+            block_cache,
+            first_key,
+            last_key,
+            bloom: None,
+            max_ts: 0,
+        };
+        Ok(sst)
     }
 
     /// Create a mock SST with only first key + last key metadata
@@ -133,19 +180,69 @@ impl SsTable {
 
     /// Read a block from the disk.
     pub fn read_block(&self, block_idx: usize) -> Result<Arc<Block>> {
-        unimplemented!()
+        let offset = self.block_meta[block_idx].offset;
+        let offset_end = self
+            .block_meta
+            .get(block_idx + 1)
+            .map_or(self.block_meta_offset, |meta| meta.offset);
+        let block_size = offset_end - offset;
+        let target_block = Arc::new(Block::decode(
+            self.file.read(offset as u64, block_size as u64)?.as_slice(),
+        ));
+        Ok(target_block)
     }
 
     /// Read a block from disk, with block cache. (Day 4)
     pub fn read_block_cached(&self, block_idx: usize) -> Result<Arc<Block>> {
-        unimplemented!()
+        let target_block = {
+            self.block_cache.as_ref().map(|cache| {
+                let key = (self.sst_id(), block_idx);
+                cache.try_get_with(key, || self.read_block(block_idx))
+            })
+        };
+
+        let target_block = match target_block {
+            Some(target_block) => target_block.map_err(|e| anyhow!("{}", e))?,
+            None => self.read_block(block_idx)?,
+        };
+        Ok(target_block)
     }
 
     /// Find the block that may contain `key`.
     /// Note: You may want to make use of the `first_key` stored in `BlockMeta`.
     /// You may also assume the key-value pairs stored in each consecutive block are sorted.
     pub fn find_block_idx(&self, key: KeySlice) -> usize {
-        unimplemented!()
+        let key = key.raw_ref();
+        if key.cmp(self.first_key.raw_ref()).is_lt() && key.cmp(self.last_key.raw_ref()).is_gt() {
+            panic!("The key is not in the sst.");
+        }
+
+        // Fix: Refactor the following unreadable code section.
+        let mut target_idx = 0;
+        let mut pre_meta: &BlockMeta;
+        let mut pre_last: &[u8] = &mut vec![][..];
+        let mut is_first_time = true;
+        // TODO: Make use of "Binary Search Algorithm" to improve the performance.
+        for meta in self.block_meta.iter() {
+            let first = meta.first_key.raw_ref();
+            if is_first_time {
+                is_first_time = false;
+                target_idx += 1;
+                pre_meta = meta;
+                pre_last = pre_meta.last_key.raw_ref();
+                continue;
+            }
+            if key.cmp(first).is_lt() {
+                if key.cmp(pre_last).is_gt() {
+                    target_idx += 1;
+                }
+                break;
+            }
+            target_idx += 1;
+            pre_meta = meta;
+            pre_last = pre_meta.last_key.raw_ref();
+        }
+        target_idx - 1
     }
 
     /// Get number of data blocks.
