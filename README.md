@@ -10,3 +10,4 @@ My implementation for [Chi's tutorial](https://github.com/skyzh/mini-lsm) of bui
 - [x] Day2: Implement memtable iterator and merge iterator based on binary heap.
 - [x] Day3: Implement SST (Sorted String Table) block encoding, decoding and block iterator.
 - [x] Day4: Implement SST encoding, decoding and SST iterator with binary search algorithm.
+- [x] Day5: Implement LSM read path.
